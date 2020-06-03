@@ -24,25 +24,25 @@ class ItemServiceImpl extends BaseService implements ItemService
         if (empty($item['type'])) {
             throw new ItemException('Item without type', ErrorCode::ITEM_ARGUMENT_INVALID);
         }
-        $arguments = $item;
-        $item = $this->getItemProcessor($item['type'])->process($item);
-        $item['created_user_id'] = empty($this->biz['user']['id']) ? 0 : $this->biz['user']['id'];
-        $item['updated_user_id'] = $item['created_user_id'];
+        $itemFields = $this->getItemProcessor($item['type'])->process($item);
+        $itemFields['created_user_id'] = empty($this->biz['user']['id']) ? 0 : $this->biz['user']['id'];
+        $itemFields['updated_user_id'] = $itemFields['created_user_id'];
         $questions = $item['questions'];
-        unset($item['questions']);
+        $attachments = $item['attachments'];
 
         $this->beginTransaction();
         try {
-            $item = $this->getItemDao()->create($item);
-            if (!empty($arguments['attachments'])) {
-                $this->updateAttachments($arguments['attachments'], $item['id'], AttachmentService::ITEM_TYPE);
-            }
+            $item = $this->getItemDao()->create($itemFields);
 
-            $this->createQuestions($item['id'], $questions);
+            $questions = $this->createQuestions($item['id'], $questions);
+
+            $this->updateItemAttachments($item, $attachments);
+
+            $this->updateQuestionAttachments($questions);
 
             $this->getItemBankService()->updateItemNum($item['bank_id'], 1);
 
-            $this->dispatch('item.create', $item, ['argument' => $arguments]);
+            $this->dispatch('item.create', $item, ['questions' => $questions]);
 
             $this->commit();
 
@@ -56,16 +56,13 @@ class ItemServiceImpl extends BaseService implements ItemService
     public function importItems($items, $bankId)
     {
         $savedItems = [];
-        $groupItems = ArrayToolkit::group($items, 'type');
 
         try {
             $this->beginTransaction();
-            foreach ($groupItems as $group) {
-                foreach ($group as $item) {
-                    $item['bank_id'] = $bankId;
-                    $savedItem = $this->createItem($item);
-                    $savedItems[] = array_merge($savedItems, $savedItem);
-                }
+            foreach ($items as $item) {
+                $item['bank_id'] = $bankId;
+                $savedItem = $this->createItem($item);
+                $savedItems[] = array_merge($savedItems, $savedItem);
             }
             $this->commit();
 
@@ -100,23 +97,22 @@ class ItemServiceImpl extends BaseService implements ItemService
         if (empty($originItem)) {
             throw new ItemException('Item not found', ErrorCode::ITEM_NOT_FOUND);
         }
-        $arguments = $item;
-        $item = $this->getItemProcessor($originItem['type'])->process($item);
-        $item['updated_user_id'] = empty($this->biz['user']['id']) ? 0 : $this->biz['user']['id'];
+
+        $itemFields = $this->getItemProcessor($originItem['type'])->process($item);
+        $itemFields['updated_user_id'] = empty($this->biz['user']['id']) ? 0 : $this->biz['user']['id'];
         $questions = $item['questions'];
-        unset($item['questions']);
+        $attachments = $item['attachments'];
 
         $this->beginTransaction();
         try {
             $this->updateQuestions($id, $questions);
 
-            $item['question_num'] = $this->getQuestionDao()->count(['item_id' => $id]);
-            $item = $this->getItemDao()->update($id, $item);
-            if (!empty($arguments['attachments'])) {
-                $this->updateAttachments($arguments['attachments'], $id, AttachmentService::ITEM_TYPE);
-            }
+            $itemFields['question_num'] = $this->getQuestionDao()->count(['item_id' => $id]);
+            $item = $this->getItemDao()->update($id, $itemFields);
 
-            $this->dispatch('item.update', $item, ['argument' => $arguments]);
+            $this->updateItemAttachments($item, $attachments);
+
+            $this->dispatch('item.update', $item, ['questions' => $questions]);
             $this->commit();
 
             return $item;
@@ -298,6 +294,8 @@ class ItemServiceImpl extends BaseService implements ItemService
         if (empty($questions)) {
             return;
         }
+
+        $itemQuestions = [];
         foreach ($questions as $question) {
             $question['item_id'] = $itemId;
             $question['created_user_id'] = empty($this->biz['user']['id']) ? 0 : $this->biz['user']['id'];
@@ -305,10 +303,11 @@ class ItemServiceImpl extends BaseService implements ItemService
             $attachments = $question['attachments'];
             unset($question['attachments']);
             $itemQuestion = $this->getQuestionDao()->create($question);
-            if (!empty($attachments)) {
-                $this->updateAttachments($attachments, $itemQuestion['id'], AttachmentService::QUESTION_TYPE);
-            }
+            $itemQuestion['attachments'] = $attachments;
+            $itemQuestions[] = $itemQuestion;
         }
+
+        return $itemQuestions;
     }
 
     protected function updateQuestions($itemId, $questions)
@@ -345,24 +344,38 @@ class ItemServiceImpl extends BaseService implements ItemService
         }
     }
 
-    protected function updateQuestionAttachments($questions)
+    protected function updateItemAttachments($item, $itemAttachments)
     {
-        foreach ($questions as $question) {
-            if (!empty($question['attachments'])) {
-                $this->updateAttachments($question['attachments'], $question['id'], AttachmentService::QUESTION_TYPE);
-            }
+        $updateAttachments = [];
+        foreach ($itemAttachments as $attachment) {
+            $updateAttachments[] = [
+                'id' => $attachment['id'],
+                'target_id' => $item['id'],
+                'target_type' => AttachmentService::ITEM_TYPE,
+                'module' => $attachment['module'],
+            ];
         }
+
+        return $this->getAttachmentService()->batchUpdate($updateAttachments);
     }
 
-    protected function updateAttachments($attachments, $targetId, $targetType)
+    protected function updateQuestionAttachments($questions)
     {
-        foreach ($attachments as $attachment) {
-            $this->getAttachmentService()->updateAttachment($attachment['id'], [
-                'target_id' => $targetId,
-                'target_type' => $targetType,
-                'module' => $attachment['module'],
-            ]);
+        $updateAttachments = [];
+        foreach ($questions as $question) {
+            if (!empty($question['attachments'])) {
+                foreach ($question['attachments'] as $attachment) {
+                    $updateAttachments[] = [
+                        'id' => $attachment['id'],
+                        'target_id' => $question['id'],
+                        'target_type' => AttachmentService::QUESTION_TYPE,
+                        'module' => $attachment['module'],
+                    ];
+                }
+            }
         }
+
+        return $this->getAttachmentService()->batchUpdate($updateAttachments);
     }
 
     protected function deleteQuestions($conditions)
