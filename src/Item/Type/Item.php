@@ -94,8 +94,8 @@ abstract class Item
 
         $item['analysis'] = $this->purifyHtml($item['analysis']);
         $item['question_num'] = count($item['questions']);
-        $item['material'] = $this->purifyHtml($this->getMaterial($item));
-        $item['material'] = preg_replace('/\[\[.+?\]\]/', '[[]]', $item['material']);
+        $item['material'] = $this->filterMaterial($item);
+
         if (empty($item['category_id'])) {
             unset($item['category_id']);
         }
@@ -146,6 +146,13 @@ abstract class Item
         }
 
         return $reviewResult;
+    }
+
+    protected function filterMaterial($item)
+    {
+        $material = $this->purifyHtml($this->getMaterial($item));
+
+        return preg_replace('/\[\[.+?\]\]/', '[[]]', $material);
     }
 
     protected function getMaterial($item)
